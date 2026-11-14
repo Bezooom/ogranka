@@ -69,7 +69,7 @@ public static class Program
 
     static void PrintHelp()
     {
-        Console.WriteLine("TeklaToStep — геометрия Tekla / IFC в STEP AP214 (мм), без сторонних CAD-библиотек.");
+        Console.WriteLine("TeklaToStep – геометрия Tekla / IFC в STEP AP214 (мм), без сторонних CAD-библиотек.");
         Console.WriteLine("  TeklaToStep --live output.stp [--tekla-bin \"C:\\Program Files\\Tekla Structures\\2024.0\\bin\"]");
         Console.WriteLine("  TeklaToStep --ifc input.ifc output.stp");
         Console.WriteLine("  TeklaToStep --smoke [test_output.stp]");
