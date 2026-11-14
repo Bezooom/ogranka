@@ -54,6 +54,8 @@
 
 Сторонних библиотек геометрии, STEP и IFC нет. Парсер и писатель на `System.*`. В csproj виден `Microsoft.NETFramework.ReferenceAssemblies.net48` 1.0.3: это build-time шим Microsoft, чтобы собрать `net48` на Linux. В exe и в рантайм он не входит.
 
+Почему не готовый конвертер. IfcOpenShell отдаёт STEP только через свой `IfcConvert` с OpenCASCADE. Обёртки вроде [`italobechepeche/ifc-converter`](https://github.com/italobechepeche/ifc-converter) и [`MutugiD/ifc-converter`](https://github.com/MutugiD/ifc-converter) запускают этот же бинарь: первый кладёт рядом сборки 0.6.0 под Windows, Linux и macOS. Из IfcOpenShell взяты только сведения о формате (`Girth` – длина отгиба, филлет – внутренний радиус), код парсера и писателя P21 написан здесь. Поэтому exe не тянет OpenCASCADE, Python и DLL и работает на голом рантайме .NET.
+
 ## Что уже измерено
 
 Полный лог: [`docs/VERIFICATION.md`](docs/VERIFICATION.md). Образцы: [`samples/i-beam-web-hole.stp`](samples/i-beam-web-hole.stp), [`samples/l-cut-box.stp`](samples/l-cut-box.stp).
