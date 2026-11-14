@@ -84,23 +84,22 @@ public static class TeklaIfcAsciiParser
             {
                 var opening = _file.Get(openings[i]);
                 if (opening == null) continue;
-                var opFaces = new List<Facet>();
                 var shape = FindArgType(opening, "IFCPRODUCTDEFINITIONSHAPE");
                 if (shape == null) continue;
                 var items = BodyItems(shape, out _);
                 var place = PlacementOf(opening);
-                foreach (var item in items)
-                    ConvertItem(item, place, opFaces, new List<List<Facet>>());
-                string why;
-                List<Plane> planes;
-                if (!TryToolFromFaces(opFaces, out planes, out why) ||
-                    !MeshOps.TrySubtract(faces, planes, out var cut, out why))
+                for (int k = 0; k < items.Count; k++)
                 {
-                    Warn("Проём #" + openings[i] + " не вычтен: " + why);
-                    continue;
+                    string why;
+                    List<Facet> cut;
+                    if (!TrySubtractItem(items[k], place, faces, out cut, out why))
+                    {
+                        Warn("Проём #" + openings[i] + " не вычтен: " + why);
+                        continue;
+                    }
+                    faces.Clear();
+                    faces.AddRange(cut);
                 }
-                faces.Clear();
-                faces.AddRange(cut);
             }
         }
 
@@ -123,6 +122,12 @@ public static class TeklaIfcAsciiParser
                     if (item.Type == "IFCEXTRUDEDAREASOLIDTAPERED")
                         Warn("IFCEXTRUDEDAREASOLIDTAPERED аппроксимирован призмой (#" + item.Id + ").");
                     ConvertExtrusion(item, world, dest);
+                    break;
+                case "IFCREVOLVEDAREASOLID":
+                    ConvertRevolved(item, world, dest);
+                    break;
+                case "IFCSWEPTDISKSOLID":
+                    ConvertSweptDisk(item, world, dest);
                     break;
                 case "IFCMAPPEDITEM":
                     ConvertMapped(item, world, dest, voids);
@@ -167,9 +172,8 @@ public static class TeklaIfcAsciiParser
             if (first != null) ConvertItem(first, world, subject, ignored);
             if (subject.Count == 0) return;
             string why = string.Empty;
-            List<Plane> planes;
-            if (second == null || !TryTool(second, world, out planes, out why) ||
-                !MeshOps.TrySubtract(subject, planes, out var cut, out why))
+            List<Facet> cut;
+            if (second == null || !TrySubtractItem(second, world, subject, out cut, out why))
             {
                 Warn((why.Length == 0 ? "клиппинг не разобран" : why) + " (#" + item.Id + "). Оставлен первый операнд.");
                 dest.AddRange(subject);
@@ -323,6 +327,190 @@ public static class TeklaIfcAsciiParser
             }
             var position = world.Multiply(posEnt != null ? Axis3(posEnt) : Mat4.Identity);
             dest.AddRange(MeshOps.Extrude(outer, holes, position, dir, depth));
+        }
+
+        void ConvertRevolved(P21Entity item, Mat4 world, List<Facet> dest)
+        {
+            var area = Resolve(Arg(item, 0));
+            var posEnt = Resolve(Arg(item, 1));
+            var axisEnt = Resolve(Arg(item, 2));
+            double angle = NumOf(Arg(item, 3), 0);
+            if (area == null || Math.Abs(angle) < 1e-9)
+            {
+                Warn("Пустое вращение #" + item.Id + ".");
+                return;
+            }
+            List<Vec3> outer;
+            List<List<Vec3>> holes;
+            string why;
+            if (!TryProfile(area, out outer, out holes, out why))
+            {
+                Warn(why + " #" + item.Id + ".");
+                return;
+            }
+            var origin = new Vec3(0, 0, 0);
+            var axis = new Vec3(0, 0, 1);
+            if (axisEnt != null)
+            {
+                var loc = Point3(Arg(axisEnt, 0));
+                if (loc != null) origin = loc.Value;
+                var ax = DirOf(Arg(axisEnt, 1));
+                if (ax != null) axis = ax.Value;
+            }
+            var local = ProfileShapes.Revolve(outer, holes, origin, axis, angle, 32);
+            var position = world.Multiply(posEnt != null ? Axis3(posEnt) : Mat4.Identity);
+            dest.AddRange(ProfileShapes.Transform(local, position));
+        }
+
+        void ConvertSweptDisk(P21Entity item, Mat4 world, List<Facet> dest)
+        {
+            var curve = Resolve(Arg(item, 0));
+            double radius = LengthOf(Arg(item, 1));
+            double inner = LengthOf(Arg(item, 2));
+            if (curve == null || radius <= 0)
+            {
+                Warn("Пустой IfcSweptDiskSolid #" + item.Id + ".");
+                return;
+            }
+            var local = CurvePoints(curve);
+            if (local == null || local.Count < 2)
+            {
+                Warn("Направляющая IfcSweptDiskSolid не разобрана #" + item.Id + ".");
+                return;
+            }
+            var path = new List<Vec3>(local.Count);
+            for (int i = 0; i < local.Count; i++) path.Add(world.TransformPoint(local[i]));
+            dest.AddRange(ProfileShapes.SweptDisk(path, radius, inner, 32));
+        }
+
+        bool TrySubtractItem(P21Entity item, Mat4 world, List<Facet> subject, out List<Facet> cut, out string why)
+        {
+            cut = subject;
+            why = string.Empty;
+            if (item.Type == "IFCEXTRUDEDAREASOLID" || item.Type == "IFCEXTRUDEDAREASOLIDTAPERED")
+                return TrySubtractExtrusion(item, world, subject, out cut, out why);
+            List<Plane> planes;
+            if (TryTool(item, world, out planes, out why) && MeshOps.TrySubtract(subject, planes, out cut, out why))
+                return true;
+            if (item.Type == "IFCFACETEDBREP" || item.Type == "IFCADVANCEDBREP" || item.Type == "IFCMANIFOLDSOLIDBREP")
+                why = "невыпуклый BREP-инструмент не вычитается";
+            return false;
+        }
+
+        bool TrySubtractExtrusion(P21Entity item, Mat4 world, List<Facet> subject, out List<Facet> cut, out string why)
+        {
+            cut = subject;
+            why = string.Empty;
+            var area = Resolve(Arg(item, 0));
+            var posEnt = Resolve(Arg(item, 1));
+            var dir = DirOf(Arg(item, 2)) ?? new Vec3(0, 0, 1);
+            double depth = LengthOf(Arg(item, 3));
+            if (area == null || Math.Abs(depth) < 1e-9)
+            {
+                why = "пустое выдавливание";
+                return false;
+            }
+            List<Vec3> outer;
+            List<List<Vec3>> holes;
+            if (!TryProfile(area, out outer, out holes, out why)) return false;
+            var position = world.Multiply(posEnt != null ? Axis3(posEnt) : Mat4.Identity);
+            if (MeshOps.IsConvexXY(outer))
+            {
+                var faces = MeshOps.Extrude(outer, holes, position, dir, depth);
+                return TrySubtractFaces(faces, subject, out cut, out why);
+            }
+            return TrySubtractConcaveExtrusion(outer, holes, position, dir, depth, subject, out cut, out why);
+        }
+
+        /// <summary>
+        /// Concave profile cut in one pass: the profile's edge planes partition the subject,
+        /// and the exact point-in-profile test decides which fragments die. Caps are not built,
+        /// so the tool must pass clean through the subject.
+        /// </summary>
+        bool TrySubtractConcaveExtrusion(
+            List<Vec3> outer,
+            List<List<Vec3>> holes,
+            Mat4 position,
+            Vec3 dir,
+            double depth,
+            List<Facet> subject,
+            out List<Facet> cut,
+            out string why)
+        {
+            cut = subject;
+            why = string.Empty;
+            if (holes.Count > 0)
+            {
+                why = "вогнутый инструмент с отверстиями не вычитается";
+                return false;
+            }
+            var axis = dir.LengthSq < 1e-18 ? new Vec3(0, 0, 1) : dir.Normalized();
+            if (Math.Abs(axis.Z) < 0.99)
+            {
+                why = "вогнутый вырез с осью не по нормали профиля не поддержан";
+                return false;
+            }
+            Mat4 inverse;
+            if (!position.TryInverse(out inverse))
+            {
+                why = "обратная матрица инструмента не построена";
+                return false;
+            }
+            double lo = Math.Min(0, depth);
+            double hi = Math.Max(0, depth);
+            var planes = new List<Plane>(outer.Count);
+            var wallBoxes = new List<IReadOnlyList<Plane>>(outer.Count);
+            for (int i = 0; i < outer.Count; i++)
+            {
+                var a = outer[i];
+                var b = outer[(i + 1) % outer.Count];
+                var edge = b - a;
+                var outward = new Vec3(edge.Y, -edge.X, 0);
+                if (outward.LengthSq < 1e-16) continue;
+                var mid = new Vec3((a.X + b.X) * 0.5, (a.Y + b.Y) * 0.5, 0);
+                planes.Add(new Plane(position.TransformPoint(mid), position.TransformVector(outward.Normalized())));
+                var along = position.TransformVector(edge.Normalized());
+                wallBoxes.Add(new List<Plane>
+                {
+                    new Plane(position.TransformPoint(a), -along),
+                    new Plane(position.TransformPoint(b), along),
+                    new Plane(position.TransformPoint(a + axis * lo), -position.TransformVector(axis)),
+                    new Plane(position.TransformPoint(a + axis * hi), position.TransformVector(axis))
+                });
+            }
+            for (int f = 0; f < subject.Count; f++)
+            {
+                for (int k = 0; k < subject[f].Outer.Count; k++)
+                {
+                    var local = inverse.TransformPoint(subject[f].Outer[k]);
+                    double t = Vec3.Dot(local, axis);
+                    if (t <= lo + 1e-6 || t >= hi - 1e-6)
+                    {
+                        why = "вогнутый вырез не прорезает тело насквозь";
+                        return false;
+                    }
+                }
+            }
+            Func<Vec3, bool> insideTool = p =>
+            {
+                var local = inverse.TransformPoint(p);
+                double t = Vec3.Dot(local, axis);
+                if (t < lo || t > hi) return false;
+                var flat = local - axis * t;
+                return MeshOps.PointInPolygonXY(flat, outer);
+            };
+            return MeshOps.TrySubtractInterior(subject, planes, insideTool, wallBoxes, out cut, out why);
+        }
+
+        bool TrySubtractFaces(List<Facet> toolFaces, List<Facet> subject, out List<Facet> cut, out string why)
+        {
+            List<Plane> planes;
+            if (!TryToolFromFaces(toolFaces, out planes, out why))
+            {
+                cut = subject;
+                return false;
+            }
+            return MeshOps.TrySubtract(subject, planes, out cut, out why);
         }
 
         void ConvertMapped(P21Entity item, Mat4 world, List<Facet> dest, List<List<Facet>> voids)
@@ -521,9 +709,8 @@ public static class TeklaIfcAsciiParser
             {
                 case "IFCRECTANGLEPROFILEDEF":
                 case "IFCROUNDEDRECTANGLEPROFILEDEF":
-                    if (profile.Type == "IFCROUNDEDRECTANGLEPROFILEDEF")
-                        WarnOnceFillet(profile.Type);
-                    outer = Apply2D(Rect(LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4))), Resolve(Arg(profile, 2)));
+                    double rounding = profile.Type == "IFCROUNDEDRECTANGLEPROFILEDEF" ? LengthOf(Arg(profile, 5)) : 0;
+                    outer = Apply2D(ProfileShapes.RoundedRect(LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4)), rounding), Resolve(Arg(profile, 2)));
                     return outer.Count >= 3;
                 case "IFCRECTANGLEHOLLOWPROFILEDEF":
                     WarnOnceFillet(profile.Type);
@@ -547,28 +734,29 @@ public static class TeklaIfcAsciiParser
                         holes.Add(Apply2D(Circle(radius - thick, 32, false), cpos));
                     return true;
                 case "IFCISHAPEPROFILEDEF":
-                    WarnOnceFillet(profile.Type);
-                    outer = Apply2D(IShape(
+                    outer = Apply2D(ProfileShapes.IShape(
                         LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4)),
-                        LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 6))), Resolve(Arg(profile, 2)));
+                        LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 6)),
+                        LengthOf(Arg(profile, 7)), LengthOf(Arg(profile, 8))), Resolve(Arg(profile, 2)));
                     return outer.Count >= 3;
                 case "IFCLSHAPEPROFILEDEF":
-                    WarnOnceFillet(profile.Type);
-                    outer = Apply2D(LShape(
+                    outer = Apply2D(ProfileShapes.Fillet(LShape(
                         LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4)), LengthOf(Arg(profile, 5))),
-                        Resolve(Arg(profile, 2)));
+                        LengthOf(Arg(profile, 6)), true, ProfileShapes.ArcSegments), Resolve(Arg(profile, 2)));
                     return outer.Count >= 3;
                 case "IFCUSHAPEPROFILEDEF":
-                    WarnOnceFillet(profile.Type);
-                    outer = Apply2D(UShape(
+                    outer = Apply2D(ProfileShapes.Fillet(UShape(
                         LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4)),
-                        LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 6))), Resolve(Arg(profile, 2)));
+                        LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 6))),
+                        LengthOf(Arg(profile, 7)), true, ProfileShapes.ArcSegments), Resolve(Arg(profile, 2)));
                     return outer.Count >= 3;
                 case "IFCCSHAPEPROFILEDEF":
-                    Warn("IFCCSHAPEPROFILEDEF записан как швеллер без отгибов (#" + profile.Id + ").");
-                    outer = Apply2D(UShape(
+                    if (LengthOf(Arg(profile, 6)) + 1e-6 < LengthOf(Arg(profile, 5)))
+                        Warn("IfcCShapeProfileDef: girth меньше толщины, губа прижата к полке #" + profile.Id + ".");
+                    outer = Apply2D(ProfileShapes.CShape(
                         LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4)),
-                        LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 5))), Resolve(Arg(profile, 2)));
+                        LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 6)),
+                        LengthOf(Arg(profile, 7))), Resolve(Arg(profile, 2)));
                     return outer.Count >= 3;
                 case "IFCTSHAPEPROFILEDEF":
                     WarnOnceFillet(profile.Type);
@@ -614,12 +802,16 @@ public static class TeklaIfcAsciiParser
                 return false;
             }
             outer = pts;
+            if (outer.Count > 3 && (outer[0] - outer[outer.Count - 1]).LengthSq <= 1e-8)
+                outer.RemoveAt(outer.Count - 1);
             if (MeshOps.SignedAreaXY(outer) < 0) outer.Reverse();
             if (innerCurves == null) return true;
             for (int i = 0; i < innerCurves.Count; i++)
             {
                 var hp = CurvePoints(innerCurves[i]);
                 if (hp == null || hp.Count < 3) continue;
+                if (hp.Count > 3 && (hp[0] - hp[hp.Count - 1]).LengthSq <= 1e-8)
+                    hp.RemoveAt(hp.Count - 1);
                 if (MeshOps.SignedAreaXY(hp) > 0) hp.Reverse();
                 holes.Add(hp);
             }

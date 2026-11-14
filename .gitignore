@@ -5,6 +5,7 @@ obj/
 *.suo
 TestResults/
 test_output.stp
+test_concave.stp
 task_plan.md
 findings.md
 progress.md

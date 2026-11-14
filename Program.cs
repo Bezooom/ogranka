@@ -148,6 +148,12 @@ public static class Program
         ok &= Check(rows, "IFC клиппинг z>7, объём 700", IfcClip());
         ok &= Check(rows, "IFC в метрах: куб 1 м = 1e9 мм³", IfcMetreCube());
         ok &= Check(rows, "IFC mapped item, сдвиг 50 мм", IfcMapped());
+        ok &= Check(rows, "IFC двутавр с галтелью 10: объём больше острого", IfcIShapeFillet());
+        ok &= Check(rows, "IFC швеллер с губами: объём 380000", IfcCShape());
+        ok &= Check(rows, "IFC скруглённый прямоугольник", IfcRoundedRect());
+        ok &= Check(rows, "IFC вращение кольца", IfcRevolve());
+        ok &= Check(rows, "IFC диск по прямой", IfcSweptDisk());
+        ok &= Check(rows, "IFC вычитание уголка: объём 3200", IfcConcaveTool());
 
         Console.WriteLine("| Требование | Вердикт | Факт |");
         Console.WriteLine("| --- | --- | --- |");
@@ -335,6 +341,169 @@ public static class Program
         var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
         return solids.Count == 1 && Near(MeshOps.SignedVolume(solids[0]), 1142400, 1);
     }
+    static bool IfcIShapeFillet()
+    {
+        var poly = ProfileShapes.IShape(100, 200, 8, 12, 10, 0);
+        double expected = Math.Abs(MeshOps.SignedAreaXY(poly)) * 300;
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCAXIS2PLACEMENT2D(#10,$);
+#13=IFCISHAPEPROFILEDEF(.AREA.,'I',#12,100.,200.,8.,12.,10.,$,$);
+#14=IFCDIRECTION((0.,0.,1.));
+#15=IFCEXTRUDEDAREASOLID(#13,#11,#14,300.);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'I',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        double volume = MeshOps.SignedVolume(solids[0]);
+        bool filletPass = solids.Count == 1 && warnings.Count == 0 && volume > 1142400 && Near(volume, expected, 1);
+        if (!filletPass)
+            Console.Error.WriteLine("FILLET vol=" + volume.ToString("0.###") + " expected=" + expected.ToString("0.###") + " solids=" + solids.Count + " warns=" + warnings.Count + " " + string.Join(" | ", warnings.ToArray()));
+        return filletPass;
+    }
+
+    static bool IfcCShape()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCAXIS2PLACEMENT2D(#10,$);
+#13=IFCCSHAPEPROFILEDEF(.AREA.,'C',#12,200.,80.,10.,30.,$);
+#14=IFCDIRECTION((0.,0.,1.));
+#15=IFCEXTRUDEDAREASOLID(#13,#11,#14,100.);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'C',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        return solids.Count == 1 && warnings.Count == 0 && Near(MeshOps.SignedVolume(solids[0]), 380000, 1);
+    }
+
+    static bool IfcRoundedRect()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCAXIS2PLACEMENT2D(#10,$);
+#13=IFCROUNDEDRECTANGLEPROFILEDEF(.AREA.,'R',#12,20.,10.,2.);
+#14=IFCDIRECTION((0.,0.,1.));
+#15=IFCEXTRUDEDAREASOLID(#13,#11,#14,10.);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'R',$,$,#18,#17,$);
+";
+        var poly = ProfileShapes.RoundedRect(20, 10, 2);
+        double expected = Math.Abs(MeshOps.SignedAreaXY(poly)) * 10;
+        double analytic = (200 - (4 - Math.PI) * 4) * 10;
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        if (solids.Count != 1 || warnings.Count != 0) return false;
+        double volume = MeshOps.SignedVolume(solids[0]);
+        return Near(volume, expected, 1) && volume < 2000 && volume > analytic - 5;
+    }
+
+    static bool IfcRevolve()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCAXIS2PLACEMENT2D(#10,$);
+#20=IFCCARTESIANPOINT((25.,0.,0.));
+#21=IFCAXIS2PLACEMENT2D(#20,$);
+#13=IFCRECTANGLEPROFILEDEF(.AREA.,'R',#21,10.,10.);
+#30=IFCCARTESIANPOINT((0.,0.,0.));
+#31=IFCDIRECTION((0.,1.,0.));
+#32=IFCAXIS1PLACEMENT(#30,#31);
+#15=IFCREVOLVEDAREASOLID(#13,#11,#32,6.28318530718);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'Ring',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        if (solids.Count != 1) return false;
+        return Near(MeshOps.SignedVolume(solids[0]), 2 * Math.PI * 25 * 100, 200);
+    }
+
+    static bool IfcSweptDisk()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#40=IFCCARTESIANPOINT((0.,0.,100.));
+#41=IFCPOLYLINE((#10,#40));
+#15=IFCSWEPTDISKSOLID(#41,5.,$);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'Bar',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        if (solids.Count != 1 || warnings.Count != 0) return false;
+        double poly = 0.5 * 32 * 25 * Math.Sin(2 * Math.PI / 32) * 100;
+        return Near(MeshOps.SignedVolume(solids[0]), poly, 1);
+    }
+
+    static bool IfcConcaveTool()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCAXIS2PLACEMENT2D(#10,$);
+#13=IFCRECTANGLEPROFILEDEF(.AREA.,'B',#12,20.,20.);
+#14=IFCDIRECTION((0.,0.,1.));
+#15=IFCEXTRUDEDAREASOLID(#13,#11,#14,10.);
+#50=IFCCARTESIANPOINT((-6.,-6.));
+#51=IFCCARTESIANPOINT((6.,-6.));
+#52=IFCCARTESIANPOINT((6.,-2.));
+#53=IFCCARTESIANPOINT((-2.,-2.));
+#54=IFCCARTESIANPOINT((-2.,6.));
+#55=IFCCARTESIANPOINT((-6.,6.));
+#56=IFCPOLYLINE((#50,#51,#52,#53,#54,#55,#50));
+#57=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,'L',#56);
+#58=IFCCARTESIANPOINT((0.,0.,-1.));
+#59=IFCAXIS2PLACEMENT3D(#58,$,$);
+#60=IFCEXTRUDEDAREASOLID(#57,#59,#14,12.);
+#61=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#15,#60);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','CSG',(#61));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'Cut',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        if (solids.Count != 1 || warnings.Count != 0) return false;
+        if (!Near(MeshOps.SignedVolume(solids[0]), 3200, 1)) return false;
+        var writer = new StepAsciiWriter();
+        writer.Write("test_concave.stp", new[] { solids[0] });
+        var stepErrors = ValidateStep(File.ReadAllText("test_concave.stp"), true);
+        bool ok = writer.Warnings.Count == 0 && stepErrors.Count == 0;
+        if (!ok)
+            Console.Error.WriteLine("CONCAVE warn=" + string.Join(" | ", writer.Warnings.ToArray()) + " errors=" + string.Join(" | ", stepErrors.ToArray()));
+        return ok;
+    }
+
 
     static bool IfcClip()
     {

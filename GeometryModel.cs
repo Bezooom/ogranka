@@ -489,6 +489,117 @@ public static class MeshOps
         return true;
     }
 
+    /// <summary>
+    /// Subtract a tool defined by its boundary planes plus an exact interior test. No caps are
+    /// generated, so the caller must prove the tool enters and leaves through the subject.
+    /// Used for concave extrusions, where half-space intersection is the convex hull, not the solid.
+    /// </summary>
+    public static bool TrySubtractInterior(
+        IReadOnlyList<Facet> subject,
+        IReadOnlyList<Plane> planes,
+        Func<Vec3, bool> insideTool,
+        IReadOnlyList<IReadOnlyList<Plane>> wallBoxes,
+        out List<Facet> result,
+        out string error)
+    {
+        result = new List<Facet>();
+        error = string.Empty;
+        if (planes == null || planes.Count == 0)
+        {
+            foreach (var f in subject) result.Add(Clone(f));
+            return true;
+        }
+        foreach (var f in subject)
+        {
+            if (f.Holes.Count > 0 && FaceHits(f, planes))
+            {
+                error = "вычитание пересекает грань с отверстием; оставлен исходный операнд";
+                return false;
+            }
+        }
+        for (int fi = 0; fi < subject.Count; fi++)
+        {
+            var face = subject[fi];
+            if (face.Outer.Count < 3) continue;
+            if (!FaceHits(face, planes))
+            {
+                result.Add(Clone(face));
+                continue;
+            }
+            var pieces = new List<Piece> { new Piece(new List<Vec3>(face.Outer), false) };
+            for (int pi = 0; pi < planes.Count; pi++)
+            {
+                var next = new List<Piece>();
+                for (int k = 0; k < pieces.Count; k++)
+                {
+                    var piece = pieces[k];
+                    List<List<Vec3>> inn;
+                    List<List<Vec3>> outp;
+                    List<(Vec3 a, Vec3 b)> cuts;
+                    bool coplanar;
+                    if (!SplitPolygon(piece.Poly, planes[pi], out inn, out outp, out cuts, out coplanar))
+                    {
+                        error = "не удалось разрезать грань плоскостью инструмента";
+                        return false;
+                    }
+                    if (coplanar)
+                    {
+                        next.Add(piece);
+                        continue;
+                    }
+                    for (int i = 0; i < outp.Count; i++)
+                        if (outp[i].Count >= 3) next.Add(new Piece(outp[i], true));
+                    for (int i = 0; i < inn.Count; i++)
+                        if (inn[i].Count >= 3) next.Add(new Piece(inn[i], piece.Outside));
+                }
+                pieces = next;
+            }
+            for (int k = 0; k < pieces.Count; k++)
+            {
+                var poly = pieces[k].Poly;
+                if (poly.Count < 3) continue;
+                if (insideTool(CentroidOf(poly))) continue;
+                var n = Newell(poly);
+                if (n.LengthSq < 1e-18) continue;
+                if (face.Normal.LengthSq > 1e-18 && Vec3.Dot(n, face.Normal) < 0)
+                {
+                    poly.Reverse();
+                    n = -n;
+                }
+                result.Add(new Facet(poly, n));
+            }
+        }
+        var caps = BuildCapsInterior(subject, planes, wallBoxes);
+        for (int i = 0; i < caps.Count; i++) result.Add(caps[i]);
+        return true;
+    }
+
+    public static Vec3 CentroidOf(IReadOnlyList<Vec3> poly)
+    {
+        double x = 0, y = 0, z = 0;
+        for (int i = 0; i < poly.Count; i++)
+        {
+            x += poly[i].X;
+            y += poly[i].Y;
+            z += poly[i].Z;
+        }
+        return new Vec3(x / poly.Count, y / poly.Count, z / poly.Count);
+    }
+
+    /// <summary>Even-odd test on the XY plane. Boundary points are undefined; feed it interior points.</summary>
+    public static bool PointInPolygonXY(Vec3 p, IReadOnlyList<Vec3> ring)
+    {
+        bool inside = false;
+        for (int i = 0, j = ring.Count - 1; i < ring.Count; j = i++)
+        {
+            double xi = ring[i].X, yi = ring[i].Y, xj = ring[j].X, yj = ring[j].Y;
+            if ((yi > p.Y) != (yj > p.Y) &&
+                p.X < (xj - xi) * (p.Y - yi) / (yj - yi) + xi)
+                inside = !inside;
+        }
+        return inside;
+    }
+
     static List<Facet> BuildCaps(IReadOnlyList<Facet> subject, IReadOnlyList<Plane> planes)
     {
         var caps = new List<Facet>();
@@ -532,7 +643,82 @@ public static class MeshOps
         return caps;
     }
 
-    static List<List<Vec3>> ClipToInside(List<Vec3> poly, List<Plane> planes)
+    /// <summary>
+    /// Caps for a tool that is not the intersection of its planes. A cut loop on one tool plane is
+    /// split by every other plane (so the wall shares its subdivision with the cut subject faces)
+    /// and the fragments inside that wall's own rectangle are kept.
+    /// </summary>
+    static List<Facet> BuildCapsInterior(
+        IReadOnlyList<Facet> subject,
+        IReadOnlyList<Plane> planes,
+        IReadOnlyList<IReadOnlyList<Plane>> wallBoxes)
+    {
+        var caps = new List<Facet>();
+        for (int pi = 0; pi < planes.Count; pi++)
+        {
+            var segs = new List<(Vec3 a, Vec3 b)>();
+            for (int f = 0; f < subject.Count; f++)
+            {
+                if (subject[f].Outer.Count < 3) continue;
+                List<List<Vec3>> inn;
+                List<List<Vec3>> outp;
+                List<(Vec3 a, Vec3 b)> cuts;
+                bool coplanar;
+                if (!SplitPolygon(subject[f].Outer, planes[pi], out inn, out outp, out cuts, out coplanar) || coplanar)
+                    continue;
+                for (int c = 0; c < cuts.Count; c++) segs.Add(cuts[c]);
+            }
+            var loops = ChainLoops(segs);
+            if (loops.Count == 0) continue;
+            var box = pi < wallBoxes.Count ? wallBoxes[pi] : new List<Plane>();
+            var desired = -planes[pi].Outward;
+            for (int i = 0; i < loops.Count; i++)
+            {
+                var pieces = new List<List<Vec3>> { new List<Vec3>(loops[i]) };
+                for (int pj = 0; pj < planes.Count; pj++)
+                {
+                    if (pj == pi) continue;
+                    var next = new List<List<Vec3>>();
+                    for (int k = 0; k < pieces.Count; k++)
+                    {
+                        List<List<Vec3>> inn;
+                        List<List<Vec3>> outp;
+                        List<(Vec3 a, Vec3 b)> cuts;
+                        bool coplanar;
+                        if (!SplitPolygon(pieces[k], planes[pj], out inn, out outp, out cuts, out coplanar))
+                            continue;
+                        if (coplanar)
+                        {
+                            next.Add(pieces[k]);
+                            continue;
+                        }
+                        for (int m = 0; m < inn.Count; m++)
+                            if (inn[m].Count >= 3) next.Add(inn[m]);
+                        for (int m = 0; m < outp.Count; m++)
+                            if (outp[m].Count >= 3) next.Add(outp[m]);
+                    }
+                    pieces = next;
+                }
+                for (int k = 0; k < pieces.Count; k++)
+                {
+                    var loop = pieces[k];
+                    if (loop.Count < 3) continue;
+                    if (!InsidePoint(CentroidOf(loop), box)) continue;
+                    var n = Newell(loop);
+                    if (n.LengthSq < 1e-18) continue;
+                    if (Vec3.Dot(n, desired) < 0)
+                    {
+                        loop.Reverse();
+                        n = -n;
+                    }
+                    caps.Add(new Facet(loop, n));
+                }
+            }
+        }
+        return caps;
+    }
+
+    static List<List<Vec3>> ClipToInside(List<Vec3> poly, IReadOnlyList<Plane> planes)
     {
         var current = new List<List<Vec3>> { new List<Vec3>(poly) };
         for (int i = 0; i < planes.Count; i++)
