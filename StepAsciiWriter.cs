@@ -22,12 +22,27 @@ public sealed class StepAsciiWriter
 
     public void Write(string path, IReadOnlyList<SolidMesh> solids)
     {
+        Write(path, solids, false);
+    }
+
+    /// <summary>
+    /// <paramref name="faceted"/> writes <c>FACETED_BREP</c> with <c>POLY_LOOP</c>: two entities per
+    /// face instead of a plane, loop and edge chain. Bodies with inner bounds or voids keep the
+    /// edge form, because a faceted shell cannot carry them.
+    /// </summary>
+    public void Write(string path, IReadOnlyList<SolidMesh> solids, bool faceted)
+    {
         using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read))
         using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
-            Write(writer, solids, Path.GetFileName(path));
+            Write(writer, solids, Path.GetFileName(path), faceted);
     }
 
     public void Write(TextWriter writer, IReadOnlyList<SolidMesh> solids, string fileLabel)
+    {
+        Write(writer, solids, fileLabel, false);
+    }
+
+    public void Write(TextWriter writer, IReadOnlyList<SolidMesh> solids, string fileLabel, bool faceted)
     {
         if (writer == null) throw new ArgumentNullException(nameof(writer));
         if (solids == null) throw new ArgumentNullException(nameof(solids));
@@ -45,6 +60,15 @@ public sealed class StepAsciiWriter
         {
             var solid = solids[s];
             if (solid == null || solid.Faces.Count == 0) continue;
+            if (faceted && solid.Voids.Count == 0 && Facetable(solid.Faces))
+            {
+                int facetedShell = WriteFacetedShell(writer, ref id, solid, points);
+                if (facetedShell != 0)
+                {
+                    closed.Add(facetedShell);
+                    continue;
+                }
+            }
             var edges = new Dictionary<EdgeKey, EdgeRec>();
             var faceIds = WriteShellFaces(writer, ref id, solid.Faces, points, vertices, edges);
             if (faceIds.Count == 0)
@@ -90,6 +114,54 @@ public sealed class StepAsciiWriter
         WriteProduct(writer, ref id, closed, openShells, fileLabel);
         writer.WriteLine("ENDSEC;");
         writer.WriteLine("END-ISO-10303-21;");
+    }
+
+    static bool Facetable(IReadOnlyList<Facet> faces)
+    {
+        for (int i = 0; i < faces.Count; i++)
+            if (faces[i].Holes.Count > 0) return false;
+        return faces.Count > 0;
+    }
+
+    /// <summary>
+    /// Closed shell of planar faces whose loop is a POLY_LOOP and whose edges are not modelled,
+    /// wrapped in FACETED_BREP. Faces stay ADVANCED_FACE with a PLANE: a shell of bare
+    /// FACE_OUTER_BOUND reads as faceless shells in Open CASCADE.
+    /// </summary>
+    int WriteFacetedShell(TextWriter writer, ref int id, SolidMesh solid, Dictionary<QuantKey, int> points)
+    {
+        var faces = new List<int>();
+        for (int f = 0; f < solid.Faces.Count; f++)
+        {
+            var facet = solid.Faces[f];
+            var outer = Clean(facet.Outer);
+            if (outer.Count < 3) continue;
+            var newell = MeshOps.Newell(outer);
+            var normal = facet.Normal.LengthSq < 1e-24 ? newell : facet.Normal.Normalized();
+            if (normal.LengthSq < 1e-24) continue;
+            if (newell.LengthSq > 1e-24 && Vec3.Dot(newell, normal) < 0) outer.Reverse();
+            var refs = new List<int>(outer.Count);
+            for (int i = 0; i < outer.Count; i++) refs.Add(Cartesian(writer, ref id, outer[i], points));
+            int loop = Emit(writer, ref id, "POLY_LOOP", "''", IdList(refs));
+            int bound = Emit(writer, ref id, "FACE_OUTER_BOUND", "''", "#" + loop, ".T.");
+            int originId = Cartesian(writer, ref id, outer[0], points);
+            var hint = outer[1] - outer[0];
+            var x = hint - normal * Vec3.Dot(hint, normal);
+            if (x.LengthSq < 1e-24)
+            {
+                var alt = Math.Abs(normal.X) < 0.9 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0);
+                x = alt - normal * Vec3.Dot(alt, normal);
+            }
+            int zId = Emit(writer, ref id, "DIRECTION", "''", Coord(normal));
+            int xId = Emit(writer, ref id, "DIRECTION", "''", Coord(x.Normalized()));
+            int axis = Emit(writer, ref id, "AXIS2_PLACEMENT_3D", "''", "#" + originId, "#" + zId, "#" + xId);
+            int plane = Emit(writer, ref id, "PLANE", "''", "#" + axis);
+            faces.Add(Emit(writer, ref id, "ADVANCED_FACE", "''", "(" + "#" + bound + ")", "#" + plane, ".T."));
+        }
+        if (faces.Count < 4) return 0;
+        int shell = Emit(writer, ref id, "CLOSED_SHELL", "''", IdList(faces));
+        string name = StepString(string.IsNullOrEmpty(solid.Name) ? "Solid" : solid.Name);
+        return Emit(writer, ref id, "FACETED_BREP", name, "#" + shell);
     }
 
     List<int> WriteShellFaces(

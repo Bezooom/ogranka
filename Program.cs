@@ -26,11 +26,17 @@ public static class Program
     {
         var rest = new List<string>();
         string? teklaBin = null;
+        bool faceted = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--tekla-bin" && i + 1 < args.Length)
             {
                 teklaBin = args[++i];
+                continue;
+            }
+            if (args[i] == "--faceted")
+            {
+                faceted = true;
                 continue;
             }
             rest.Add(args[i]);
@@ -51,7 +57,7 @@ public static class Program
                 Console.Error.WriteLine("Нужен путь: TeklaToStep --live output.stp");
                 return 1;
             }
-            return Live(rest[1], teklaBin);
+            return Live(rest[1], teklaBin, faceted);
         }
         if (rest[0] == "--ifc")
         {
@@ -60,7 +66,7 @@ public static class Program
                 Console.Error.WriteLine("Нужны пути: TeklaToStep --ifc input.ifc output.stp");
                 return 1;
             }
-            return ConvertIfc(rest[1], rest[2]);
+            return ConvertIfc(rest[1], rest[2], faceted);
         }
         Console.Error.WriteLine("Неизвестный аргумент: " + rest[0]);
         PrintHelp();
@@ -71,7 +77,8 @@ public static class Program
     {
         Console.WriteLine("TeklaToStep – геометрия Tekla / IFC в STEP AP214 (мм), без сторонних CAD-библиотек.");
         Console.WriteLine("  TeklaToStep --live output.stp [--tekla-bin \"C:\\Program Files\\Tekla Structures\\2024.0\\bin\"]");
-        Console.WriteLine("  TeklaToStep --ifc input.ifc output.stp");
+        Console.WriteLine("  TeklaToStep --ifc input.ifc output.stp [--faceted]");
+        Console.WriteLine("  --faceted: FACETED_BREP и POLY_LOOP вместо рёберной схемы (файл в разы меньше)");
         Console.WriteLine("  TeklaToStep --smoke [test_output.stp]");
         Console.WriteLine("  TeklaToStep --self-test");
         Console.WriteLine("Windows: для --live собирайте net48 x64 и запускайте при открытой модели Tekla.");
@@ -79,27 +86,27 @@ public static class Program
         Console.WriteLine("IFC-режим работает на любой ОС, где есть этот runtime.");
     }
 
-    static int Live(string output, string? teklaBin)
+    static int Live(string output, string? teklaBin, bool faceted = false)
     {
         var warnings = new List<string>();
         var solids = TeklaDirectExtractor.ExtractSelected(teklaBin, warnings);
         for (int i = 0; i < warnings.Count; i++) Console.Error.WriteLine(warnings[i]);
         if (solids.Count == 0) return 2;
         var writer = new StepAsciiWriter();
-        writer.Write(output, solids);
+        writer.Write(output, solids, faceted);
         for (int i = 0; i < writer.Warnings.Count; i++) Console.Error.WriteLine(writer.Warnings[i]);
         Console.WriteLine("Записано тел: " + solids.Count.ToString(CultureInfo.InvariantCulture) + " → " + output);
         return 0;
     }
 
-    static int ConvertIfc(string input, string output)
+    static int ConvertIfc(string input, string output, bool faceted = false)
     {
         var warnings = new List<string>();
         var solids = TeklaIfcAsciiParser.ParseFile(input, warnings);
         for (int i = 0; i < warnings.Count; i++) Console.Error.WriteLine(warnings[i]);
         if (solids.Count == 0) return 2;
         var writer = new StepAsciiWriter();
-        writer.Write(output, solids);
+        writer.Write(output, solids, faceted);
         for (int i = 0; i < writer.Warnings.Count; i++) Console.Error.WriteLine(writer.Warnings[i]);
         Console.WriteLine("IFC тел: " + solids.Count.ToString(CultureInfo.InvariantCulture) + " → " + output);
         return 0;
@@ -154,6 +161,7 @@ public static class Program
         ok &= Check(rows, "IFC вращение кольца", IfcRevolve());
         ok &= Check(rows, "IFC диск по прямой", IfcSweptDisk());
         ok &= Check(rows, "IFC вычитание уголка: объём 3200", IfcConcaveTool());
+        ok &= Check(rows, "FACETED_BREP: POLY_LOOP без рёбер и дублей точек", FacetedStep());
         ok &= Check(rows, "IFC швеллер с гиртом меньше стенки: U без отгибов", IfcSmallGirth());
         ok &= Check(rows, "IFC диск по замкнутой направляющей: тор без крышек", IfcClosedSweep());
         ok &= Check(rows, "IFC вращение на 90° с отверстием профиля", IfcRevolveHole());
@@ -594,6 +602,18 @@ public static class Program
         return ValidateStep(File.ReadAllText(path), true).Count == 0;
     }
 
+    static bool FacetedStep()
+    {
+        var box = MeshOps.Box("box", 0, 0, 0, 10, 10, 10);
+        var writer = new StepAsciiWriter();
+        writer.Write("test_faceted.stp", new[] { box }, true);
+        if (writer.Warnings.Count > 0) return false;
+        var errors = ValidateFacetedStep(File.ReadAllText("test_faceted.stp"));
+        if (errors.Count > 0)
+            Console.Error.WriteLine("FACETED: " + string.Join("; ", errors.ToArray()));
+        return errors.Count == 0;
+    }
+
     static bool IfcSmallGirth()
     {
         string body = @"
@@ -779,6 +799,64 @@ public static class Program
             new Vec3(130, 4, 30), new Vec3(170, 4, 30), new Vec3(170, -4, 30), new Vec3(130, -4, 30)
         }, new Vec3(0, 0, -1)));
         return mesh;
+    }
+
+    /// <summary>Structural check of the compact form: faces carry POLY_LOOP, no edge entities.</summary>
+    public static List<string> ValidateFacetedStep(string text)
+    {
+        var errors = new List<string>();
+        if (text.IndexOf("ISO-10303-21;", StringComparison.Ordinal) < 0) errors.Add("нет ISO-10303-21");
+        if (text.IndexOf("FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));", StringComparison.Ordinal) < 0) errors.Add("нет AUTOMOTIVE_DESIGN");
+        if (text.IndexOf("SI_UNIT(.MILLI.,.METRE.)", StringComparison.Ordinal) < 0) errors.Add("нет миллиметров");
+        if (text.IndexOf("FACETED_BREP", StringComparison.Ordinal) < 0) errors.Add("нет FACETED_BREP");
+        if (text.IndexOf("ADVANCED_BREP_SHAPE_REPRESENTATION", StringComparison.Ordinal) < 0) errors.Add("нет ADVANCED_BREP_SHAPE_REPRESENTATION");
+        if (text.IndexOf("END-ISO-10303-21;", StringComparison.Ordinal) < 0) errors.Add("нет конца файла");
+        if (text.IndexOf("EDGE_CURVE(", StringComparison.Ordinal) >= 0) errors.Add("есть EDGE_CURVE: схема не компактная");
+        if (text.IndexOf("VERTEX_POINT(", StringComparison.Ordinal) >= 0) errors.Add("есть VERTEX_POINT: схема не компактная");
+
+        var defined = new HashSet<int>();
+        var refs = new HashSet<int>();
+        int faces = Count(text, "ADVANCED_FACE");
+        int loops = Count(text, "POLY_LOOP");
+        var pointCoords = new Dictionary<int, string>();
+        var loopRefs = new List<int>();
+        var lines = text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line.Length == 0 || line[0] != '#') continue;
+            int eq = line.IndexOf('=');
+            if (eq < 0) continue;
+            int id;
+            if (!int.TryParse(line.Substring(1, eq - 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out id)) continue;
+            if (!defined.Add(id)) errors.Add("повторный #" + id.ToString(CultureInfo.InvariantCulture));
+            CollectRefs(line, eq + 1, refs);
+            int cp = line.IndexOf("=CARTESIAN_POINT(", StringComparison.Ordinal);
+            if (cp >= 0) pointCoords[id] = line.Substring(cp + 17).Trim();
+            int pl = line.IndexOf("=POLY_LOOP(", StringComparison.Ordinal);
+            if (pl >= 0)
+            {
+                var local = new HashSet<int>();
+                CollectRefs(line, pl, local);
+                foreach (int r in local) loopRefs.Add(r);
+            }
+        }
+        var idsByCoord = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < loopRefs.Count; i++)
+        {
+            string coords;
+            if (!pointCoords.TryGetValue(loopRefs[i], out coords)) continue;
+            int existing;
+            if (idsByCoord.TryGetValue(coords, out existing) && existing != loopRefs[i])
+                errors.Add("одна вершина записана дважды: " + coords);
+            else
+                idsByCoord[coords] = loopRefs[i];
+        }
+        foreach (int r in refs)
+            if (!defined.Contains(r)) errors.Add("ссылка на несуществующий #" + r.ToString(CultureInfo.InvariantCulture));
+        if (faces == 0) errors.Add("нет граней");
+        if (loops != faces) errors.Add("POLY_LOOP " + loops.ToString(CultureInfo.InvariantCulture) + " != граней " + faces.ToString(CultureInfo.InvariantCulture));
+        return errors;
     }
 
     public static List<string> ValidateStep(string text, bool requireManifold)
