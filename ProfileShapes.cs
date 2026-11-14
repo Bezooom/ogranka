@@ -33,8 +33,8 @@ public static class ProfileShapes
     {
         double hw = width / 2, hd = depth / 2;
         double lip = girth;
-        if (lip < wall) lip = wall;
-        if (lip > hd) lip = hd;
+        if (lip > hd - wall) lip = hd - wall;
+        if (lip <= wall + 1e-9) return UShape(depth, width, wall, fillet);
         var pts = new List<Vec3>
         {
             new Vec3(-hw, -hd, 0),
@@ -49,6 +49,20 @@ public static class ProfileShapes
             new Vec3(hw, hd - lip, 0),
             new Vec3(hw, hd, 0),
             new Vec3(-hw, hd, 0)
+        };
+        if (fillet > 1e-6) pts = Fillet(pts, fillet, concave: true, ArcSegments);
+        return pts;
+    }
+
+    /// <summary>C-shaped section without return lips: web on -X, opening +X.</summary>
+    public static List<Vec3> UShape(double depth, double width, double wall, double fillet)
+    {
+        double hw = width / 2, hd = depth / 2;
+        var pts = new List<Vec3>
+        {
+            new Vec3(-hw, -hd, 0), new Vec3(hw, -hd, 0), new Vec3(hw, -hd + wall, 0),
+            new Vec3(-hw + wall, -hd + wall, 0), new Vec3(-hw + wall, hd - wall, 0),
+            new Vec3(hw, hd - wall, 0), new Vec3(hw, hd, 0), new Vec3(-hw, hd, 0)
         };
         if (fillet > 1e-6) pts = Fillet(pts, fillet, concave: true, ArcSegments);
         return pts;
@@ -150,7 +164,8 @@ public static class ProfileShapes
         int n = Math.Max(12, steps);
         var axis = axisDir.LengthSq < 1e-18 ? new Vec3(0, 0, 1) : axisDir.Normalized();
         int stations = full ? n : n + 1;
-        AddRevolvedLoop(faces, ring, axisOrigin, axis, sweep, n, stations, full, outwardRight: true);
+
+        var loops = new List<List<Vec3>> { ring };
         if (holes != null)
         {
             for (int h = 0; h < holes.Count; h++)
@@ -158,10 +173,73 @@ public static class ProfileShapes
                 var hole = new List<Vec3>(holes[h]);
                 if (hole.Count < 3) continue;
                 if (MeshOps.SignedAreaXY(hole) > 0) hole.Reverse();
-                AddRevolvedLoop(faces, hole, axisOrigin, axis, sweep, n, stations, full, outwardRight: true);
+                loops.Add(hole);
             }
         }
+
+        var rings = new List<List<Vec3>[]>(loops.Count);
+        for (int l = 0; l < loops.Count; l++)
+        {
+            var set = new List<Vec3>[stations];
+            for (int st = 0; st < stations; st++)
+            {
+                double a = sweep * st / steps;
+                var pts = new List<Vec3>(loops[l].Count);
+                for (int i = 0; i < loops[l].Count; i++)
+                    pts.Add(RotateAround(loops[l][i], axisOrigin, axis, a));
+                set[st] = pts;
+            }
+            rings.Add(set);
+        }
+
+        for (int l = 0; l < loops.Count; l++)
+        {
+            var set = rings[l];
+            for (int st = 0; st < steps; st++)
+            {
+                int s2 = (st + 1) % stations;
+                double a = sweep * st / steps;
+                var src = loops[l];
+                for (int i = 0; i < src.Count; i++)
+                {
+                    int j = (i + 1) % src.Count;
+                    var edge = src[j] - src[i];
+                    var want = RotateDirection(new Vec3(edge.Y, -edge.X, 0), axis, a);
+                    var quad = new List<Vec3> { set[st][i], set[st][j], set[s2][j], set[s2][i] };
+                    if (MeshOps.NewellRaw(quad).LengthSq < 1e-12) continue;
+                    if (Vec3.Dot(MeshOps.Newell(quad), want) < 0) quad.Reverse();
+                    faces.Add(new Facet(quad, MeshOps.Newell(quad)));
+                }
+            }
+        }
+
+        if (!full)
+        {
+            var holeStarts = new List<List<Vec3>>();
+            var holeEnds = new List<List<Vec3>>();
+            for (int l = 1; l < rings.Count; l++)
+            {
+                holeStarts.Add(rings[l][0]);
+                holeEnds.Add(rings[l][stations - 1]);
+            }
+            AddRevolveCap(faces, rings[0][0], holeStarts, MeshOps.CentroidOf(rings[0][1]));
+            AddRevolveCap(faces, rings[0][stations - 1], holeEnds, MeshOps.CentroidOf(rings[0][stations - 2]));
+        }
         return faces;
+    }
+
+    static void AddRevolveCap(List<Facet> faces, List<Vec3> outerRing, List<List<Vec3>> holeRings, Vec3 materialSide)
+    {
+        var loop = new List<Vec3>(outerRing);
+        if (Vec3.Dot(materialSide - MeshOps.CentroidOf(outerRing), MeshOps.Newell(loop)) > 0) loop.Reverse();
+        var facet = new Facet(loop, MeshOps.Newell(loop));
+        for (int h = 0; h < holeRings.Count; h++)
+        {
+            var hl = new List<Vec3>(holeRings[h]);
+            if (Vec3.Dot(MeshOps.Newell(hl), facet.Normal) > 0) hl.Reverse();
+            facet.Holes.Add(hl);
+        }
+        faces.Add(facet);
     }
 
     public static List<Facet> SweptDisk(IReadOnlyList<Vec3> pathIn, double radius, double innerRadius, int segments)
@@ -173,13 +251,17 @@ public static class ProfileShapes
             if (path.Count == 0 || (path[path.Count - 1] - pathIn[i]).LengthSq > 1e-8)
                 path.Add(pathIn[i]);
         }
+        bool closed = path.Count > 3 && (path[0] - path[path.Count - 1]).LengthSq <= 1e-8;
+        if (closed) path.RemoveAt(path.Count - 1);
         if (path.Count < 2 || radius <= 1e-6) return faces;
         int segs = Math.Max(8, segments);
         var tangent = new Vec3[path.Count];
         for (int i = 0; i < path.Count; i++)
         {
-            var back = i == 0 ? path[1] - path[0] : path[i] - path[i - 1];
-            var fwd = i == path.Count - 1 ? back : path[i + 1] - path[i];
+            int prev = i == 0 ? (closed ? path.Count - 1 : 0) : i - 1;
+            int next = i == path.Count - 1 ? (closed ? 0 : path.Count - 1) : i + 1;
+            var back = path[i] - path[prev];
+            var fwd = path[next] - path[i];
             var t = back + fwd;
             tangent[i] = t.LengthSq < 1e-18 ? back.Normalized() : t.Normalized();
         }
@@ -216,6 +298,13 @@ public static class ProfileShapes
             AddTubeWall(faces, outer[i], outer[i + 1], awayFromCenter: true);
             if (inner != null) AddTubeWall(faces, inner[i], inner[i + 1], awayFromCenter: false);
         }
+        if (closed)
+        {
+            int last = path.Count - 1;
+            AddTubeWall(faces, outer[last], outer[0], awayFromCenter: true);
+            if (inner != null) AddTubeWall(faces, inner[last], inner[0], awayFromCenter: false);
+            return faces;
+        }
         AddDiskCap(faces, outer[0], inner == null ? null : inner[0], path[1] - path[0], atStart: true);
         AddDiskCap(faces, outer[path.Count - 1], inner == null ? null : inner[path.Count - 1], path[path.Count - 1] - path[path.Count - 2], atStart: false);
         return faces;
@@ -239,56 +328,6 @@ public static class ProfileShapes
             dst.Add(facet);
         }
         return dst;
-    }
-
-    static void AddRevolvedLoop(
-        List<Facet> faces,
-        List<Vec3> loop,
-        Vec3 axisOrigin,
-        Vec3 axis,
-        double sweep,
-        int steps,
-        int stations,
-        bool full,
-        bool outwardRight)
-    {
-        var rings = new List<Vec3>[stations];
-        for (int s = 0; s < stations; s++)
-        {
-            double a = full ? sweep * s / steps : sweep * s / steps;
-            rings[s] = new List<Vec3>(loop.Count);
-            for (int i = 0; i < loop.Count; i++)
-                rings[s].Add(RotateAround(loop[i], axisOrigin, axis, a));
-        }
-        int spans = full ? steps : steps;
-        for (int s = 0; s < spans; s++)
-        {
-            int s2 = (s + 1) % stations;
-            double a = sweep * s / steps;
-            for (int i = 0; i < loop.Count; i++)
-            {
-                int j = (i + 1) % loop.Count;
-                var edge = loop[j] - loop[i];
-                var right = new Vec3(edge.Y, -edge.X, 0);
-                if (!outwardRight) right = -right;
-                var want = RotateDirection(right, axis, a);
-                var quad = new List<Vec3> { rings[s][i], rings[s][j], rings[s2][j], rings[s2][i] };
-                if (MeshOps.NewellRaw(quad).LengthSq < 1e-12) continue;
-                if (Vec3.Dot(MeshOps.Newell(quad), want) < 0) quad.Reverse();
-                faces.Add(new Facet(quad, MeshOps.Newell(quad)));
-            }
-        }
-        if (full) return;
-        AddCapAway(faces, rings[0], rings[1]);
-        AddCapAway(faces, rings[stations - 1], rings[stations - 2]);
-    }
-
-    static void AddCapAway(List<Facet> faces, List<Vec3> cap, List<Vec3> other)
-    {
-        var loop = new List<Vec3>(cap);
-        var into = other[0] - cap[0];
-        if (Vec3.Dot(MeshOps.Newell(loop), into) > 0) loop.Reverse();
-        faces.Add(new Facet(loop, MeshOps.Newell(loop)));
     }
 
     static void AddTubeWall(List<Facet> faces, List<Vec3> a, List<Vec3> b, bool awayFromCenter)

@@ -154,6 +154,9 @@ public static class Program
         ok &= Check(rows, "IFC вращение кольца", IfcRevolve());
         ok &= Check(rows, "IFC диск по прямой", IfcSweptDisk());
         ok &= Check(rows, "IFC вычитание уголка: объём 3200", IfcConcaveTool());
+        ok &= Check(rows, "IFC швеллер с гиртом меньше стенки: U без отгибов", IfcSmallGirth());
+        ok &= Check(rows, "IFC диск по замкнутой направляющей: тор без крышек", IfcClosedSweep());
+        ok &= Check(rows, "IFC вращение на 90° с отверстием профиля", IfcRevolveHole());
 
         Console.WriteLine("| Требование | Вердикт | Факт |");
         Console.WriteLine("| --- | --- | --- |");
@@ -386,7 +389,8 @@ public static class Program
 ";
         var warnings = new List<string>();
         var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
-        return solids.Count == 1 && warnings.Count == 0 && Near(MeshOps.SignedVolume(solids[0]), 380000, 1);
+        return solids.Count == 1 && warnings.Count == 0 && Near(MeshOps.SignedVolume(solids[0]), 380000, 1)
+            && StepClosed(solids[0], "test_c_shape.stp");
     }
 
     static bool IfcRoundedRect()
@@ -437,8 +441,9 @@ public static class Program
 ";
         var warnings = new List<string>();
         var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
-        if (solids.Count != 1) return false;
-        return Near(MeshOps.SignedVolume(solids[0]), 2 * Math.PI * 25 * 100, 200);
+        if (solids.Count != 1 || warnings.Count != 0) return false;
+        return Near(MeshOps.SignedVolume(solids[0]), 2 * Math.PI * 25 * 100, 200)
+            && StepClosed(solids[0], "test_revolve.stp");
     }
 
     static bool IfcSweptDisk()
@@ -460,7 +465,8 @@ public static class Program
         var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
         if (solids.Count != 1 || warnings.Count != 0) return false;
         double poly = 0.5 * 32 * 25 * Math.Sin(2 * Math.PI / 32) * 100;
-        return Near(MeshOps.SignedVolume(solids[0]), poly, 1);
+        return Near(MeshOps.SignedVolume(solids[0]), poly, 1)
+            && StepClosed(solids[0], "test_disk.stp");
     }
 
     static bool IfcConcaveTool()
@@ -578,6 +584,97 @@ public static class Program
             for (int k = 0; k < solids[0].Faces[i].Outer.Count; k++)
                 if (solids[0].Faces[i].Outer[k].X < minX) minX = solids[0].Faces[i].Outer[k].X;
         return Near(minX, 45, 1e-4) && Near(MeshOps.SignedVolume(solids[0]), 1000, 1e-2);
+    }
+
+    static bool StepClosed(SolidMesh solid, string path)
+    {
+        var writer = new StepAsciiWriter();
+        writer.Write(path, new[] { solid });
+        if (writer.Warnings.Count > 0) return false;
+        return ValidateStep(File.ReadAllText(path), true).Count == 0;
+    }
+
+    static bool IfcSmallGirth()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCAXIS2PLACEMENT2D(#10,$);
+#13=IFCCSHAPEPROFILEDEF(.AREA.,'C',#12,200.,80.,10.,5.,$);
+#14=IFCDIRECTION((0.,0.,1.));
+#15=IFCEXTRUDEDAREASOLID(#13,#11,#14,100.);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'C',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        return solids.Count == 1 && warnings.Count == 1 && Near(MeshOps.SignedVolume(solids[0]), 340000, 1)
+            && StepClosed(solids[0], "test_u_shape.stp");
+    }
+
+    static bool IfcClosedSweep()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#40=IFCCARTESIANPOINT((100.,0.,0.));
+#41=IFCCARTESIANPOINT((100.,100.,0.));
+#42=IFCCARTESIANPOINT((0.,100.,0.));
+#43=IFCPOLYLINE((#10,#40,#41,#42,#10));
+#15=IFCSWEPTDISKSOLID(#43,5.,$);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'Loop',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        if (solids.Count != 1 || warnings.Count != 0) return false;
+        double section = 0.5 * 32 * 25 * Math.Sin(2 * Math.PI / 32);
+        double straight = section * 400;
+        double volume = MeshOps.SignedVolume(solids[0]);
+        return volume > straight * 0.6 && volume < straight && StepClosed(solids[0], "test_torus.stp");
+    }
+
+    static bool IfcRevolveHole()
+    {
+        string body = @"
+#5=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#6=IFCUNITASSIGNMENT((#5));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#50=IFCCARTESIANPOINT((20.,-5.));
+#51=IFCCARTESIANPOINT((30.,-5.));
+#52=IFCCARTESIANPOINT((30.,5.));
+#53=IFCCARTESIANPOINT((20.,5.));
+#54=IFCPOLYLINE((#50,#51,#52,#53,#50));
+#55=IFCCARTESIANPOINT((23.,-2.));
+#56=IFCCARTESIANPOINT((23.,2.));
+#57=IFCCARTESIANPOINT((27.,2.));
+#58=IFCCARTESIANPOINT((27.,-2.));
+#59=IFCPOLYLINE((#55,#56,#57,#58,#55));
+#13=IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,'R',#54,(#59));
+#30=IFCCARTESIANPOINT((0.,0.,0.));
+#31=IFCDIRECTION((0.,1.,0.));
+#32=IFCAXIS1PLACEMENT(#30,#31);
+#15=IFCREVOLVEDAREASOLID(#13,#11,#32,1.57079632679);
+#16=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#15));
+#17=IFCPRODUCTDEFINITIONSHAPE($,$,(#16));
+#18=IFCLOCALPLACEMENT($,#11);
+#19=IFCBEAM('b',$,'Ring',$,$,#18,#17,$);
+";
+        var warnings = new List<string>();
+        var solids = TeklaIfcAsciiParser.ParseText(Header() + body + Footer(), warnings);
+        if (solids.Count != 1 || warnings.Count != 0) return false;
+        double expected = Math.PI / 2 * (100 * 25 - 16 * 25);
+        return Near(MeshOps.SignedVolume(solids[0]), expected, expected * 0.01)
+            && StepClosed(solids[0], "test_revolve_hole.stp");
     }
 
     static List<SolidMesh>? Parse(string data)

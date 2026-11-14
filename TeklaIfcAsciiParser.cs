@@ -752,7 +752,7 @@ public static class TeklaIfcAsciiParser
                     return outer.Count >= 3;
                 case "IFCCSHAPEPROFILEDEF":
                     if (LengthOf(Arg(profile, 6)) + 1e-6 < LengthOf(Arg(profile, 5)))
-                        Warn("IfcCShapeProfileDef: girth меньше толщины, губа прижата к полке #" + profile.Id + ".");
+                        Warn("IfcCShapeProfileDef: girth не больше толщины стенки, отгибы не строятся (#" + profile.Id + ").");
                     outer = Apply2D(ProfileShapes.CShape(
                         LengthOf(Arg(profile, 3)), LengthOf(Arg(profile, 4)),
                         LengthOf(Arg(profile, 5)), LengthOf(Arg(profile, 6)),
