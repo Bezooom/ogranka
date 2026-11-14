@@ -6,6 +6,7 @@ obj/
 TestResults/
 test_output.stp
 test_concave.stp
+test_*.stp
 task_plan.md
 findings.md
 progress.md
