@@ -1,7 +1,7 @@
 ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION(('Tekla geometry as AP214 planar manifold solid'),'2;1');
-FILE_NAME('test_revolve_hole.stp','2026-11-14T12:25:23',('TeklaToStep'),('TeklaToStep'),'TeklaToStep STEP writer','TeklaToStep','');
+FILE_NAME('test_revolve_hole.stp','2026-11-14T12:26:41',('TeklaToStep'),('TeklaToStep'),'TeklaToStep STEP writer','TeklaToStep','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
 ENDSEC;
 DATA;
