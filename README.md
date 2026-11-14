@@ -52,7 +52,7 @@
 
 Исполняемый файл называется `TeklaToStep`. Репозиторий называется Огранка.
 
-Сторонних библиотек геометрии нет. Парсер IFC и писатель STEP написаны на `System.*`. Сборка `net48` тянет только compile-time пакет ссылок .NET Framework, в exe он не входит.
+Сторонних библиотек геометрии, STEP и IFC нет. Парсер и писатель на `System.*`. В csproj виден `Microsoft.NETFramework.ReferenceAssemblies.net48` 1.0.3: это build-time шим Microsoft, чтобы собрать `net48` на Linux. В exe и в рантайм он не входит.
 
 ## Что уже измерено
 
@@ -75,8 +75,9 @@
 - `GetSolid()` по выбранной балке, пластине, полибалке, B-rep и сборке;
 - компиляция ветки `#if TEKLA`. На стенде не было `Tekla.Structures.Model.dll`.
 
-Сборка на стенде шла SDK 10.0.115, таргеты `net10.0` и `net48`. SDK 8 этот проект не соберёт: таргета `net8.0` нет. Для `--live` на Windows нужен .NET Framework 4.8 x64 и открытая Tekla.
+## Быстрый старт
 
+Сборка на стенде шла SDK 10.0.115, таргеты `net10.0` и `net48`. SDK 8 этот проект не соберёт: таргета `net8.0` нет. Для `--live` на Windows нужен .NET Framework 4.8 x64 и открытая Tekla.
 
 ```bash
 git clone https://github.com/Bezooom/ogranka && cd ogranka
@@ -100,7 +101,7 @@ bin\Release\net48\TeklaToStep.exe --live model.stp --tekla-bin "C:\Program Files
 
 Поддержано в парсере IFC, и это проверено фикстурами, не файлом Tekla:
 
-- `IfcFacetedBrep`, выдачавливание прямоугольника, двутавра, круга, кольца, L/U/T/Z и произвольного контура;
+- `IfcFacetedBrep`, выдавливание прямоугольника, двутавра, круга, кольца, L/U/T/Z и произвольного контура;
 - `IfcMappedItem`, `IfcBooleanClippingResult` с полупространством, выпуклый проём через `IfcRelVoidsElement`;
 - `IfcTriangulatedFaceSet` и `IfcPolygonalFaceSet` читаются, отдельного гейта на них в прогоне не было;
 - единицы файла переводятся в миллиметры.
@@ -134,7 +135,7 @@ bin\Release\net48\TeklaToStep.exe --live model.stp --tekla-bin "C:\Program Files
 | `StepAsciiWriter.cs` | ISO 10303-21, AP214, мм |
 | `TeklaIfcAsciiParser.cs` | офлайн IFC |
 | `TeklaDirectExtractor.cs` | выбранные объекты Tekla |
-| `GeometryModel.cs` | сетка, выдачавливание, выпуклое вычитание |
+| `GeometryModel.cs` | сетка, выдавливание, выпуклое вычитание |
 | `Program.cs` | CLI и гейты |
 | `samples/i-beam-web-hole.stp` | образец прогона |
 | `docs/VERIFICATION.md` | числа стенда |
